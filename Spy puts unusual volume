@@ -1,0 +1,67 @@
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import time
+import base64
+
+# 1. Mobile-friendly Page Config (No Charts)
+st.set_page_config(page_title="SPY Puts Scanner", layout="wide")
+st.title("🚨 SPY Puts: High Vol IV < $0.30")
+
+# 2. Visual Alert Styling
+st.markdown("""
+<style>
+.alert-flash { animation: flash 0.5s infinite; background: red; color: white; padding: 10px; border-radius: 5px; text-align: center; }
+@keyframes flash { 0% { opacity: 1; } 50% { opacity: 0.5; } 100% { opacity: 1; } }
+</style>
+""", unsafe_allow_html=True)
+
+# 3. Notification & Sound Logic
+def notify_browser(title, body):
+    st.markdown(f"<script>if (Notification.permission === 'granted') {{ new Notification('{title}', {{body: '{body}'}}); }} else {{ Notification.requestPermission(); }}</script>", unsafe_allow_html=True)
+
+def play_sound():
+    audio_base64 = "UkIGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAAAABAAgAZGF0YQoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQAoGAACBhYqFbF1fdJivrJBhNjVgodDbq2EcBj+a2/LDciUFLIHO8tiJNwgZaLvt559NEAxQp+PwtmMcBjiR1/LMeSwFJHfH8N2QQA="
+    st.markdown(f'<audio autoplay><source src="data:audio/wav;base64,{audio_base64}" type="audio/wav"></audio>', unsafe_allow_html=True)
+
+# 4. Scanner Logic (SPY Only)
+@st.cache_data(ttl=30)
+def scan_spy_puts():
+    ticker = yf.Ticker('SPY')
+    hist = ticker.history(period='1d')
+    if hist.empty: return pd.DataFrame()
+    spot = hist['Close'].iloc[-1]
+    results = []
+    for exp in ticker.options[:10]:
+        chain = ticker.option_chain(exp)
+        puts = chain.puts
+        puts['spot'], puts['expiry'] = spot, exp
+        puts['moneyness'] = (puts['strike'] / spot) * 100
+        # Filters: Vol > 100, IV > 50%, Price < $0.30, OTM > 110%
+        mask = (puts['volume'] > 100) & (puts['impliedVolatility'] > 0.5) & (puts['lastPrice'] < 0.30) & (puts['moneyness'] < 90)
+        filtered = puts[mask].copy()
+        if not filtered.empty:
+            filtered['sudden_spike'] = filtered['volume'] > (filtered['openInterest'] * 2)
+            results.append(filtered)
+    return pd.concat(results, ignore_index=True) if results else pd.DataFrame()
+
+# 5. Execution Loop
+placeholder = st.empty()
+alerts = st.empty()
+
+while True:
+    df = scan_spy_puts()
+    with placeholder.container():
+        if not df.empty:
+            st.metric("SPY Spot", f"${df['spot'].iloc[0]:.2f}")
+            st.dataframe(df[['contractSymbol', 'strike', 'expiry', 'lastPrice', 'volume', 'impliedVolatility', 'sudden_spike']].style.format({'impliedVolatility': '{:.1%}', 'lastPrice': '${:.2f}'}), use_container_width=True)
+            spikes = df[df['sudden_spike']]
+            if not spikes.empty:
+                top = spikes.iloc[0]
+                msg = f"SPY ALERT: {top['contractSymbol']} Vol: {int(top['volume'])} IV: {top['impliedVolatility']:.0%} ${top['lastPrice']:.2f}"
+                alerts.markdown(f'<div class="alert-flash"><h2>{msg}</h2></div>', unsafe_allow_html=True)
+                notify_browser("SPY Sudden Activity!", msg)
+                play_sound()
+        else:
+            st.info("Scanning... No Black Swan puts detected yet.")
+    time.sleep(30)
